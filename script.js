@@ -1596,7 +1596,7 @@ window.addEventListener("appinstalled", () => {
 /* ================================================= */
 
 // Replace with the VAPID_PUBLIC_KEY you generated on the server
-const VAPID_PUBLIC_KEY = "PASTE_YOUR_VAPID_PUBLIC_KEY_HERE";
+const VAPID_PUBLIC_KEY = "BACGHgwqHIZkzEHxFJqWDOK2WUBvNnKLgswIEP6GY-UL3tsj81qw-zr-kiPpqEoXSiHh1wDVmskXv9xPChs2yWA";
 
 function urlBase64ToUint8Array(base64String) {
     const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
