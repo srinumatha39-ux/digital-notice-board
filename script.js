@@ -1558,7 +1558,7 @@ function setupEventListeners() {
 }
 if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-        navigator.serviceWorker.register("/service-worker.js")
+        navigator.serviceWorker.register("./service-worker.js")
             .then(() => console.log("PWA Service Worker registered"))
             .catch(err => console.error("Service Worker error:", err));
     });
@@ -1589,4 +1589,3 @@ window.addEventListener("beforeinstallprompt", (e) => {
 window.addEventListener("appinstalled", () => {
     console.log("CampusNotify installed");
 });
-
