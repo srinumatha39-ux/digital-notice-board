@@ -1563,3 +1563,29 @@ if ("serviceWorker" in navigator) {
             .catch(err => console.error("Service Worker error:", err));
     });
 }
+let deferredPrompt;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+
+    const installBtn = document.getElementById("installBtn");
+
+    if (installBtn) {
+        installBtn.style.display = "block";
+
+        installBtn.onclick = async () => {
+            deferredPrompt.prompt();
+
+            const { outcome } = await deferredPrompt.userChoice;
+            console.log("Install:", outcome);
+
+            deferredPrompt = null;
+            installBtn.style.display = "none";
+        };
+    }
+});
+
+window.addEventListener("appinstalled", () => {
+    console.log("CampusNotify installed");
+});
