@@ -650,7 +650,6 @@ async function handleCollegeRegister(e) {
     switchView('college-login-view');
     document.getElementById('college-id').value = collegeId;
 }
-
 async function handleStudentLogin(e) {
     e.preventDefault();
     const selectedCollegeId = document.getElementById('student-login-college').value;
@@ -685,6 +684,10 @@ async function handleStudentLogin(e) {
             switchView('student-dashboard-view');
             await initNoticeData();
             document.getElementById('student-login-form').reset();
+
+            // === PUSH NOTIFICATIONS: subscribe this student for their college ===
+            subscribeToPush(data.user.collegeId || selectedCollegeId, data.user.roll || data.user.username || roll);
+
             return;
         } else if (response.status === 403 || response.status === 401) {
             showLoginError('student', data.message || 'Invalid Security Key, Roll Number, or Password.');
@@ -725,6 +728,10 @@ async function handleStudentLogin(e) {
         switchView('student-dashboard-view');
         await initNoticeData();
         document.getElementById('student-login-form').reset();
+
+        // === PUSH NOTIFICATIONS: subscribe this student for their college ===
+        subscribeToPush(selectedCollegeId, matchedUser.username);
+
     } else {
         showLoginError('student', 'Invalid Roll Number or Password. Check credentials or register.');
         showToast('Invalid login credentials', 'error');
