@@ -38,7 +38,54 @@ try {
 } catch (err) {
     console.warn('⚠️ @supabase/supabase-js optional load notice:', err.message);
 }
+// Web Push (VAPID) Configuration
+const webpush = require('web-push');
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails(
+        process.env.VAPID_SUBJECT || 'mailto:srinumatha39@gmail.com',
+        process.env.VAPID_PUBLIC_KEY,
+        process.env.VAPID_PRIVATE_KEY
+    );
+    console.log('🔔 Web Push VAPID configured');
+} else {
+    console.warn('⚠️ VAPID keys not set — push notifications disabled');
+}
 
+async function sendPushToCollege(collegeId, notice) {
+    if (!supabase) return;
+    try {
+        const { data: subscriptions, error } = await supabase
+            .from('push_subscriptions')
+            .select('*')
+            .eq('college_id', collegeId);
+
+        if (error) throw error;
+        if (!subscriptions || subscriptions.length === 0) return;
+
+        const payload = JSON.stringify({
+            title: `📢 New ${notice.category || 'Notice'}`,
+            body: notice.title,
+            url: './index.html'
+        });
+
+        const sendPromises = subscriptions.map(async (row) => {
+            try {
+                await webpush.sendNotification(row.subscription, payload);
+            } catch (err) {
+                if (err.statusCode === 410 || err.statusCode === 404) {
+                    await supabase.from('push_subscriptions').delete().eq('endpoint', row.endpoint);
+                } else {
+                    console.error('Push send error:', err.message);
+                }
+            }
+        });
+
+        await Promise.all(sendPromises);
+        console.log(`Push sent to ${subscriptions.length} subscriber(s) for college ${collegeId}`);
+    } catch (err) {
+        console.error('sendPushToCollege failed:', err);
+    }
+}
 // Directories
 const FRONTEND_DIR = __dirname;
 const DATA_DIR = path.join(__dirname, 'data');
@@ -347,11 +394,44 @@ app.get('/api/notices', (req, res) => {
         notices: notices
     });
 });
+// --------------------------------------------------------------------------
+// Push Notification Subscribe Endpoint
+// --------------------------------------------------------------------------
+app.post('/api/push/subscribe', async (req, res) => {
+    const { collegeId, rollNumber, subscription } = req.body;
 
+    if (!collegeId || !subscription || !subscription.endpoint) {
+        return res.status(400).json({ success: false, message: 'Missing collegeId or subscription' });
+    }
+
+    if (!supabase) {
+        return res.status(500).json({ success: false, message: 'Push storage not configured' });
+    }
+
+    try {
+        const { error } = await supabase
+            .from('push_subscriptions')
+            .upsert(
+                {
+                    college_id: collegeId.toUpperCase(),
+                    roll_number: rollNumber || null,
+                    endpoint: subscription.endpoint,
+                    subscription: subscription
+                },
+                { onConflict: 'endpoint' }
+            );
+
+        if (error) throw error;
+        res.status(201).json({ success: true });
+    } catch (err) {
+        console.error('Error saving push subscription:', err);
+        res.status(500).json({ success: false, message: 'Failed to save subscription' });
+    }
+});
 // --------------------------------------------------------------------------
 // 4. POST Create Notice
 // --------------------------------------------------------------------------
-app.post('/api/notices', upload.single('attachment'), (req, res) => {
+app.post('/api/notices', upload.single('attachment'), async (req, res) => {
     const { title, category, publishDate, expiryDate, description, collegeId } = req.body;
 
     if (!title || !category || !publishDate || !description) {
@@ -402,7 +482,8 @@ app.post('/api/notices', upload.single('attachment'), (req, res) => {
 
     // Emit realtime event
     try { io.emit('notice_created', { notice: newNotice }); } catch (err) { console.warn('Socket emit failed:', err.message); }
-
+// Send push notifications to students of this college
+    sendPushToCollege(assignedCollegeId, newNotice);
     res.status(201).json({
         success: true,
         supabaseUrl: SUPABASE_URL,
