@@ -1589,3 +1589,4 @@ window.addEventListener("beforeinstallprompt", (e) => {
 window.addEventListener("appinstalled", () => {
     console.log("CampusNotify installed");
 });
+
