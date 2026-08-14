@@ -322,17 +322,158 @@ function clearSession() {
 // --------------------------------------------------------------------------
 // 4. View Router & Screen Switching
 // --------------------------------------------------------------------------
-function switchView(viewId) {
-    const views = document.querySelectorAll('.view-section');
-    views.forEach(v => v.classList.remove('active'));
 
-    const targetView = document.getElementById(viewId);
-    if (targetView) {
-        targetView.classList.add('active');
-        window.scrollTo(0, 0);
+(function () {
+    'use strict';
+
+    const HISTORY_KEY = '__notice_board_view__';
+
+    // Get the currently visible application view
+    function getCurrentView() {
+        const activeView = document.querySelector('.view-section.active');
+        return activeView ? activeView.id : null;
     }
-}
 
+    // Actually display a view WITHOUT creating another history entry
+    function displayView(viewId) {
+        const views = document.querySelectorAll('.view-section');
+
+        views.forEach(function (view) {
+            view.classList.remove('active');
+        });
+
+        const targetView = document.getElementById(viewId);
+
+        if (targetView) {
+            targetView.classList.add('active');
+            window.scrollTo(0, 0);
+        }
+    }
+
+    // Create a history state
+    function createHistoryState(viewId) {
+        return {
+            [HISTORY_KEY]: true,
+            viewId: viewId
+        };
+    }
+
+    // --------------------------------------------------------------
+    // Main navigation function
+    // --------------------------------------------------------------
+    window.switchView = function (viewId) {
+
+        if (!viewId) {
+            return;
+        }
+
+        const targetView = document.getElementById(viewId);
+
+        if (!targetView) {
+            console.warn('View not found:', viewId);
+            return;
+        }
+
+        const currentView = getCurrentView();
+
+        // If already on this screen, don't create duplicate history
+        if (currentView === viewId) {
+            return;
+        }
+
+        // Show the requested screen
+        displayView(viewId);
+
+        // Add the screen to browser history
+        history.pushState(
+            createHistoryState(viewId),
+            '',
+            '#' + encodeURIComponent(viewId)
+        );
+    };
+
+    // --------------------------------------------------------------
+    // Initialize browser history when application starts
+    // --------------------------------------------------------------
+    function initializeViewHistory() {
+
+        const currentView = getCurrentView();
+
+        if (!currentView) {
+            return;
+        }
+
+        const hashView = decodeURIComponent(
+            window.location.hash.replace(/^#/, '')
+        );
+
+        // If URL already contains a valid application view,
+        // display that view.
+        if (
+            hashView &&
+            document.getElementById(hashView)
+        ) {
+            displayView(hashView);
+
+            history.replaceState(
+                createHistoryState(hashView),
+                '',
+                '#' + encodeURIComponent(hashView)
+            );
+
+            return;
+        }
+
+        // Otherwise create the first application history entry
+        history.replaceState(
+            createHistoryState(currentView),
+            '',
+            '#' + encodeURIComponent(currentView)
+        );
+    }
+
+    // --------------------------------------------------------------
+    // Android System Back / Browser Back
+    // --------------------------------------------------------------
+    window.addEventListener('popstate', function (event) {
+
+        // If this is one of our application's history entries
+        if (
+            event.state &&
+            event.state[HISTORY_KEY] &&
+            event.state.viewId
+        ) {
+            displayView(event.state.viewId);
+            return;
+        }
+
+        /*
+         * If the browser tries to leave the application because
+         * there is no application history entry, restore the
+         * current view instead of allowing the browser to close/
+         * navigate away from the application.
+         */
+        const currentView = getCurrentView();
+
+        if (currentView) {
+            history.pushState(
+                createHistoryState(currentView),
+                '',
+                '#' + encodeURIComponent(currentView)
+            );
+
+            displayView(currentView);
+        }
+    });
+
+    // --------------------------------------------------------------
+    // Initialize after the HTML has loaded
+    // --------------------------------------------------------------
+    document.addEventListener('DOMContentLoaded', function () {
+        initializeViewHistory();
+    });
+
+})();
 // --------------------------------------------------------------------------
 // 5. Authentication & Registration Handlers
 // --------------------------------------------------------------------------
