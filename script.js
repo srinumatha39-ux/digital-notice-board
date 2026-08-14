@@ -1572,7 +1572,7 @@ window.addEventListener("beforeinstallprompt", (e) => {
     const installBtn = document.getElementById("installBtn");
 
     if (installBtn) {
-        installBtn.style.display = "block";
+        installBtn.classList.remove("hidden");
 
         installBtn.onclick = async () => {
             deferredPrompt.prompt();
@@ -1581,7 +1581,7 @@ window.addEventListener("beforeinstallprompt", (e) => {
             console.log("Install:", outcome);
 
             deferredPrompt = null;
-            installBtn.style.display = "none";
+            installBtn.classList.add("hidden");
         };
     }
 });
