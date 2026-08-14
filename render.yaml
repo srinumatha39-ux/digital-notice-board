@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: digital-notice-board-backend
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SUPABASE_URL
+        value: https://pcwwukuxarlridmdfxlz.supabase.co
+      - key: SUPABASE_ANON_KEY
+        value: sbp_b211a70cc7ed789c11f03d33b9dacac4f2d627a1
