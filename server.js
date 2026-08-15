@@ -619,3 +619,9 @@ server.listen(PORT, () => {
     console.log(`Socket.IO ready for realtime updates`);
     console.log(`====================================================`);
 });
+});
+
+// Start Render server
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Digital Notice Board running on port ${PORT}`);
+});
