@@ -1,14 +1,16 @@
 /* ========================================================================
-   DIGITAL NOTICE BOARD - RENDER DEPLOYMENT BACKEND
+   DIGITAL NOTICE BOARD - RENDER + SUPABASE BACKEND (CORRECTED)
+   All data now persists in real Supabase tables / Storage, not local disk.
    ======================================================================== */
 
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
 const http = require('http');
 const { Server } = require('socket.io');
+const { createClient } = require('@supabase/supabase-js');
+const webpush = require('web-push');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -26,20 +28,26 @@ io.on('connection', (socket) => {
     });
 });
 
-// Supabase Cloud Configuration & Credentials
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+// --------------------------------------------------------------------------
+// Supabase Client — uses the SERVICE ROLE key (server-side only).
+// This is safe here because the browser never talks to Supabase directly;
+// it only talks to this Express server. The service role key bypasses RLS,
+// so you don't need to write any RLS policies for this app to work.
+// --------------------------------------------------------------------------
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-let supabase = null;
-try {
-    const { createClient } = require('@supabase/supabase-js');
-    supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    console.log(`☁️ Supabase Cloud Client Initialized for: ${SUPABASE_URL}`);
-} catch (err) {
-    console.warn('⚠️ @supabase/supabase-js optional load notice:', err.message);
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('❌ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars. Data will NOT persist.');
 }
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false }
+});
+
+const ATTACHMENTS_BUCKET = 'attachments';
+
 // Web Push (VAPID) Configuration
-const webpush = require('web-push');
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
     webpush.setVapidDetails(
         process.env.VAPID_SUBJECT || 'mailto:srinumatha39@gmail.com',
@@ -52,7 +60,6 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 }
 
 async function sendPushToCollege(collegeId, notice) {
-    if (!supabase) return;
     try {
         const { data: subscriptions, error } = await supabase
             .from('push_subscriptions')
@@ -86,16 +93,9 @@ async function sendPushToCollege(collegeId, notice) {
         console.error('sendPushToCollege failed:', err);
     }
 }
-// Directories
-const FRONTEND_DIR = __dirname;
-const DATA_DIR = path.join(__dirname, 'data');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
-const NOTICES_DB_FILE = path.join(DATA_DIR, 'notices.json');
-const USERS_DB_FILE = path.join(DATA_DIR, 'users.json');
 
-// Ensure data & upload directories exist
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+// Directories (frontend static files only — no data lives on disk anymore)
+const FRONTEND_DIR = __dirname;
 
 // Production CORS Middleware
 app.use(cors({
@@ -110,73 +110,46 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static frontend files (index.html, style.css, script.js)
 app.use(express.static(FRONTEND_DIR));
 
-// Serve static uploaded attachment files
-app.use('/uploads', express.static(UPLOADS_DIR));
-
-// Configure Multer for File Uploads
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const ext = path.extname(file.originalname);
-        const nameWithoutExt = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_\-]/g, '_');
-        cb(null, `${nameWithoutExt}_${uniqueSuffix}${ext}`);
-    }
-});
-
+// Multer: hold uploads in memory, then push the buffer to Supabase Storage
+// (Render's disk is wiped on every restart, so we never write files to disk)
 const upload = multer({
-    storage: storage,
+    storage: multer.memoryStorage(),
     limits: { fileSize: 10 * 1024 * 1024 }
 });
 
-// Helper Functions - Notices DB
-function readNoticesDB() {
-    try {
-        if (!fs.existsSync(NOTICES_DB_FILE)) return [];
-        const raw = fs.readFileSync(NOTICES_DB_FILE, 'utf8');
-        return JSON.parse(raw);
-    } catch (err) {
-        console.error('Error reading notices database:', err);
-        return [];
-    }
+async function uploadAttachmentToSupabase(file) {
+    const ext = path.extname(file.originalname);
+    const base = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const storagePath = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${base}${ext}`;
+
+    const { error } = await supabase.storage
+        .from(ATTACHMENTS_BUCKET)
+        .upload(storagePath, file.buffer, { contentType: file.mimetype });
+
+    if (error) throw error;
+
+    const { data: publicUrlData } = supabase.storage
+        .from(ATTACHMENTS_BUCKET)
+        .getPublicUrl(storagePath);
+
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    const fileSizeKB = (file.size / 1024).toFixed(0);
+
+    return {
+        name: file.originalname,
+        path: storagePath,
+        size: file.size > 1024 * 1024 ? `${fileSizeMB} MB` : `${fileSizeKB} KB`,
+        type: file.mimetype,
+        url: publicUrlData.publicUrl
+    };
 }
 
-function writeNoticesDB(notices) {
+async function deleteAttachmentFromSupabase(storagePath) {
+    if (!storagePath) return;
     try {
-        fs.writeFileSync(NOTICES_DB_FILE, JSON.stringify(notices, null, 2), 'utf8');
-        return true;
+        await supabase.storage.from(ATTACHMENTS_BUCKET).remove([storagePath]);
     } catch (err) {
-        console.error('Error writing notices database:', err);
-        return false;
-    }
-}
-
-// Helper Functions - Users DB
-function readUsersDB() {
-    try {
-        if (!fs.existsSync(USERS_DB_FILE)) {
-            const initialUsers = [
-                { id: 'usr-admin-1', role: 'admin', name: 'College Administrator', collegeId: 'COLLEGE001', collegeName: 'Apex Institute of Technology', username: 'COLLEGE001', password: 'admin123', createdAt: new Date().toISOString() },
-                { id: 'usr-student-1', role: 'student', name: 'Student Account', collegeId: 'COLLEGE001', username: '23A81A0501', password: 'student123', createdAt: new Date().toISOString() }
-            ];
-            writeUsersDB(initialUsers);
-            return initialUsers;
-        }
-        const raw = fs.readFileSync(USERS_DB_FILE, 'utf8');
-        return JSON.parse(raw);
-    } catch (err) {
-        console.error('Error reading users database:', err);
-        return [];
-    }
-}
-
-function writeUsersDB(users) {
-    try {
-        fs.writeFileSync(USERS_DB_FILE, JSON.stringify(users, null, 2), 'utf8');
-        return true;
-    } catch (err) {
-        console.error('Error writing users database:', err);
-        return false;
+        console.warn('Failed to delete old attachment:', err.message);
     }
 }
 
@@ -186,12 +159,21 @@ app.get('/', (req, res) => {
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+    let dbConnected = false;
+    try {
+        const { error } = await supabase.from('notices').select('id').limit(1);
+        dbConnected = !error;
+    } catch (err) {
+        dbConnected = false;
+    }
+
     res.json({
         status: 'online',
         service: 'Digital Notice Board Production REST API',
         renderUrl: `${req.protocol}://${req.get('host')}`,
         supabaseUrl: SUPABASE_URL,
+        supabaseConnected: dbConnected,
         timestamp: new Date().toISOString()
     });
 });
@@ -210,28 +192,33 @@ app.get('/api/config', (req, res) => {
 // 1. Colleges List API Endpoint
 // --------------------------------------------------------------------------
 app.get('/api/colleges', async (req, res) => {
-    const users = readUsersDB();
-    const adminUsers = users.filter(u => u.role === 'admin');
-    
-    const collegesMap = new Map();
-    collegesMap.set('COLLEGE001', 'Apex Institute of Technology');
+    try {
+        const { data: admins, error } = await supabase
+            .from('users')
+            .select('college_id, college_name')
+            .eq('role', 'admin');
 
-    adminUsers.forEach(admin => {
-        const cId = admin.collegeId || admin.username;
-        const cName = admin.collegeName || `${cId} College`;
-        collegesMap.set(cId.toUpperCase(), cName);
-    });
+        if (error) throw error;
 
-    const list = Array.from(collegesMap.entries()).map(([collegeId, collegeName]) => ({
-        collegeId,
-        collegeName
-    }));
+        const collegesMap = new Map();
+        collegesMap.set('COLLEGE001', 'Apex Institute of Technology');
 
-    res.json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        colleges: list
-    });
+        (admins || []).forEach(admin => {
+            const cId = (admin.college_id || '').toUpperCase();
+            if (!cId) return;
+            collegesMap.set(cId, admin.college_name || `${cId} College`);
+        });
+
+        const list = Array.from(collegesMap.entries()).map(([collegeId, collegeName]) => ({
+            collegeId,
+            collegeName
+        }));
+
+        res.json({ success: true, supabaseUrl: SUPABASE_URL, colleges: list });
+    } catch (err) {
+        console.error('GET /api/colleges failed:', err);
+        res.status(500).json({ success: false, message: 'Failed to load colleges.' });
+    }
 });
 
 // --------------------------------------------------------------------------
@@ -249,61 +236,74 @@ app.post('/api/auth/register', async (req, res) => {
 
     const cleanUsername = username.trim().toUpperCase();
     const cleanName = name.trim();
-    const users = readUsersDB();
 
-    const assignedCollegeId = (role === 'admin' ? cleanUsername : (collegeId ? collegeId.trim().toUpperCase() : 'COLLEGE001'));
-    const assignedCollegeName = (role === 'admin' ? (collegeName ? collegeName.trim() : `${cleanUsername} College Board`) : '');
+    try {
+        const assignedCollegeId = (role === 'admin' ? cleanUsername : (collegeId ? collegeId.trim().toUpperCase() : 'COLLEGE001'));
+        const assignedCollegeName = (role === 'admin' ? (collegeName ? collegeName.trim() : `${cleanUsername} College Board`) : null);
 
-    // For student registration: Verify College Admin Security Key to protect college information
-    if (role === 'student') {
-        const adminProfile = users.find(u => u.role === 'admin' && (u.collegeId === assignedCollegeId || u.username === assignedCollegeId));
-        if (adminProfile && collegeKey !== adminProfile.password) {
-            return res.status(403).json({
+        if (role === 'student') {
+            const { data: adminProfile } = await supabase
+                .from('users')
+                .select('*')
+                .eq('role', 'admin')
+                .or(`college_id.eq.${assignedCollegeId},username.eq.${assignedCollegeId}`)
+                .maybeSingle();
+
+            if (adminProfile && collegeKey !== adminProfile.password) {
+                return res.status(403).json({
+                    success: false,
+                    message: `Security Key Error: Incorrect College Security Key for (${assignedCollegeId}). College information is protected.`
+                });
+            }
+        }
+
+        const { data: existingUser } = await supabase
+            .from('users')
+            .select('id')
+            .eq('username', cleanUsername)
+            .eq('role', role)
+            .maybeSingle();
+
+        if (existingUser) {
+            const idLabel = role === 'admin' ? 'College ID' : 'Roll Number';
+            return res.status(409).json({
                 success: false,
-                message: `Security Key Error: Incorrect College Security Key for (${assignedCollegeId}). College information is protected.`
+                message: `An account with this ${idLabel} (${cleanUsername}) already exists.`
             });
         }
-    }
 
-    // Check duplicate
-    const existingUser = users.find(u => u.username.toUpperCase() === cleanUsername && u.role === role);
-    if (existingUser) {
-        const idLabel = role === 'admin' ? 'College ID' : 'Roll Number';
-        return res.status(409).json({
-            success: false,
-            message: `An account with this ${idLabel} (${cleanUsername}) already exists.`
+        const newUser = {
+            id: `usr-${role}-${Date.now()}`,
+            role,
+            name: cleanName,
+            username: cleanUsername,
+            college_id: assignedCollegeId,
+            college_name: assignedCollegeName,
+            password
+        };
+
+        const { error: insertError } = await supabase.from('users').insert(newUser);
+        if (insertError) throw insertError;
+
+        res.status(201).json({
+            success: true,
+            supabaseUrl: SUPABASE_URL,
+            message: `${role === 'admin' ? 'College Admin' : 'Student'} account registered successfully! You can now log in.`,
+            user: {
+                role: newUser.role,
+                name: newUser.name,
+                username: newUser.username,
+                collegeId: newUser.college_id,
+                collegeName: newUser.college_name
+            }
         });
+    } catch (err) {
+        console.error('POST /api/auth/register failed:', err);
+        res.status(500).json({ success: false, message: 'Registration failed. Please try again.' });
     }
-
-    const newUser = {
-        id: `usr-${role}-${Date.now()}`,
-        role: role,
-        name: cleanName,
-        username: cleanUsername,
-        collegeId: assignedCollegeId,
-        collegeName: assignedCollegeName,
-        password: password,
-        createdAt: new Date().toISOString()
-    };
-
-    users.push(newUser);
-    writeUsersDB(users);
-
-    res.status(201).json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        message: `${role === 'admin' ? 'College Admin' : 'Student'} account registered successfully! You can now log in.`,
-        user: {
-            role: newUser.role,
-            name: newUser.name,
-            username: newUser.username,
-            collegeId: newUser.collegeId,
-            collegeName: newUser.collegeName
-        }
-    });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
     const { role, username, password, collegeId, collegeKey } = req.body;
 
     if (!role || !username || !password) {
@@ -314,86 +314,120 @@ app.post('/api/auth/login', (req, res) => {
     }
 
     const cleanUsername = username.trim().toUpperCase();
-    const users = readUsersDB();
 
-    const matchedUser = users.find(u => 
-        u.role === role && 
-        u.username.toUpperCase() === cleanUsername && 
-        u.password === password
-    );
+    try {
+        const { data: matchedUser } = await supabase
+            .from('users')
+            .select('*')
+            .eq('role', role)
+            .eq('username', cleanUsername)
+            .eq('password', password)
+            .maybeSingle();
 
-    if (matchedUser) {
-        const targetCollegeId = matchedUser.collegeId || collegeId || 'COLLEGE001';
-        
-        // For student login: Verify College Admin Security Key to protect college information
-        if (role === 'student') {
-            const adminProfile = users.find(u => u.role === 'admin' && (u.collegeId === targetCollegeId || u.username === targetCollegeId));
-            if (adminProfile && collegeKey !== adminProfile.password) {
-                return res.status(403).json({
-                    success: false,
-                    message: `Security Key Error: Incorrect College Security Key for (${targetCollegeId}). College information is protected.`
-                });
+        if (matchedUser) {
+            const targetCollegeId = matchedUser.college_id || collegeId || 'COLLEGE001';
+
+            if (role === 'student') {
+                const { data: adminProfile } = await supabase
+                    .from('users')
+                    .select('*')
+                    .eq('role', 'admin')
+                    .or(`college_id.eq.${targetCollegeId},username.eq.${targetCollegeId}`)
+                    .maybeSingle();
+
+                if (adminProfile && collegeKey !== adminProfile.password) {
+                    return res.status(403).json({
+                        success: false,
+                        message: `Security Key Error: Incorrect College Security Key for (${targetCollegeId}). College information is protected.`
+                    });
+                }
             }
+
+            const { data: adminProfile2 } = await supabase
+                .from('users')
+                .select('*')
+                .eq('role', 'admin')
+                .or(`college_id.eq.${targetCollegeId},username.eq.${targetCollegeId}`)
+                .maybeSingle();
+
+            const resolvedCollegeName = matchedUser.college_name || (adminProfile2 ? adminProfile2.college_name : `${targetCollegeId} Notice Portal`);
+
+            return res.json({
+                success: true,
+                supabaseUrl: SUPABASE_URL,
+                message: `${role === 'admin' ? 'College Admin' : 'Student'} login successful.`,
+                user: {
+                    role: matchedUser.role,
+                    id: matchedUser.username,
+                    roll: matchedUser.username,
+                    name: matchedUser.name,
+                    collegeId: targetCollegeId,
+                    collegeName: resolvedCollegeName,
+                    token: `${matchedUser.role}-token-${Date.now()}`
+                }
+            });
         }
 
-        const adminProfile = users.find(u => u.role === 'admin' && (u.collegeId === targetCollegeId || u.username === targetCollegeId));
-        const resolvedCollegeName = matchedUser.collegeName || (adminProfile ? adminProfile.collegeName : `${targetCollegeId} Notice Portal`);
-
-        return res.json({
-            success: true,
-            supabaseUrl: SUPABASE_URL,
-            message: `${role === 'admin' ? 'College Admin' : 'Student'} login successful.`,
-            user: {
-                role: matchedUser.role,
-                id: matchedUser.username,
-                roll: matchedUser.username,
-                name: matchedUser.name,
-                collegeId: targetCollegeId,
-                collegeName: resolvedCollegeName,
-                token: `${matchedUser.role}-token-${Date.now()}`
-            }
+        const idLabel = role === 'admin' ? 'College ID' : 'Roll Number';
+        return res.status(401).json({
+            success: false,
+            message: `Invalid ${idLabel} or Password.`
         });
+    } catch (err) {
+        console.error('POST /api/auth/login failed:', err);
+        res.status(500).json({ success: false, message: 'Login failed. Please try again.' });
     }
-
-    const idLabel = role === 'admin' ? 'College ID' : 'Roll Number';
-    return res.status(401).json({
-        success: false,
-        message: `Invalid ${idLabel} or Password.`
-    });
 });
 
 // --------------------------------------------------------------------------
 // 3. GET Notices (Multi-Tenant College Isolation)
 // --------------------------------------------------------------------------
-app.get('/api/notices', (req, res) => {
-    let notices = readNoticesDB();
+app.get('/api/notices', async (req, res) => {
     const { collegeId, category, search } = req.query;
 
-    if (collegeId) {
-        const cId = collegeId.trim().toUpperCase();
-        notices = notices.filter(n => (n.collegeId ? n.collegeId.toUpperCase() === cId : cId === 'COLLEGE001'));
-    }
+    try {
+        let query = supabase.from('notices').select('*').order('created_at', { ascending: false });
 
-    if (category && category.toLowerCase() !== 'all') {
-        notices = notices.filter(n => n.category.toLowerCase() === category.toLowerCase());
-    }
+        if (collegeId) {
+            query = query.eq('college_id', collegeId.trim().toUpperCase());
+        }
+        if (category && category.toLowerCase() !== 'all') {
+            query = query.ilike('category', category);
+        }
+        if (search) {
+            const q = search.trim();
+            query = query.or(`title.ilike.%${q}%,description.ilike.%${q}%,category.ilike.%${q}%`);
+        }
 
-    if (search) {
-        const query = search.toLowerCase().trim();
-        notices = notices.filter(n => 
-            n.title.toLowerCase().includes(query) ||
-            n.description.toLowerCase().includes(query) ||
-            n.category.toLowerCase().includes(query)
-        );
-    }
+        const { data: notices, error } = await query;
+        if (error) throw error;
 
-    res.json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        count: notices.length,
-        notices: notices
-    });
+        res.json({
+            success: true,
+            supabaseUrl: SUPABASE_URL,
+            count: notices.length,
+            notices: notices.map(rowToNotice)
+        });
+    } catch (err) {
+        console.error('GET /api/notices failed:', err);
+        res.status(500).json({ success: false, message: 'Failed to load notices.' });
+    }
 });
+
+function rowToNotice(row) {
+    return {
+        id: row.id,
+        collegeId: row.college_id,
+        title: row.title,
+        category: row.category,
+        publishDate: row.publish_date,
+        expiryDate: row.expiry_date,
+        description: row.description,
+        attachment: row.attachment,
+        createdAt: row.created_at
+    };
+}
+
 // --------------------------------------------------------------------------
 // Push Notification Subscribe Endpoint
 // --------------------------------------------------------------------------
@@ -404,10 +438,6 @@ app.post('/api/push/subscribe', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Missing collegeId or subscription' });
     }
 
-    if (!supabase) {
-        return res.status(500).json({ success: false, message: 'Push storage not configured' });
-    }
-
     try {
         const { error } = await supabase
             .from('push_subscriptions')
@@ -416,7 +446,7 @@ app.post('/api/push/subscribe', async (req, res) => {
                     college_id: collegeId.toUpperCase(),
                     roll_number: rollNumber || null,
                     endpoint: subscription.endpoint,
-                    subscription: subscription
+                    subscription
                 },
                 { onConflict: 'endpoint' }
             );
@@ -428,6 +458,7 @@ app.post('/api/push/subscribe', async (req, res) => {
         res.status(500).json({ success: false, message: 'Failed to save subscription' });
     }
 });
+
 // --------------------------------------------------------------------------
 // 4. POST Create Notice
 // --------------------------------------------------------------------------
@@ -441,187 +472,190 @@ app.post('/api/notices', upload.single('attachment'), async (req, res) => {
         });
     }
 
-    const notices = readNoticesDB();
-    let attachmentObj = null;
+    try {
+        let attachmentObj = null;
+        if (req.file) {
+            attachmentObj = await uploadAttachmentToSupabase(req.file);
+        } else if (req.body.attachmentName) {
+            attachmentObj = {
+                name: req.body.attachmentName,
+                size: req.body.attachmentSize || 'Attachment',
+                type: req.body.attachmentType || 'application/octet-stream',
+                url: req.body.attachmentDataUrl || null
+            };
+        }
 
-    if (req.file) {
-        const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
-        const fileSizeKB = (req.file.size / 1024).toFixed(0);
-        attachmentObj = {
-            name: req.file.originalname,
-            filename: req.file.filename,
-            size: req.file.size > 1024 * 1024 ? `${fileSizeMB} MB` : `${fileSizeKB} KB`,
-            type: req.file.mimetype,
-            url: `/uploads/${req.file.filename}`
+        const assignedCollegeId = (collegeId ? collegeId.trim().toUpperCase() : 'COLLEGE001');
+
+        const newNoticeRow = {
+            id: 'notice-' + Date.now(),
+            college_id: assignedCollegeId,
+            title: title.trim(),
+            category: category.trim(),
+            publish_date: publishDate,
+            expiry_date: expiryDate || null,
+            description: description.trim(),
+            attachment: attachmentObj
         };
-    } else if (req.body.attachmentName) {
-        attachmentObj = {
-            name: req.body.attachmentName,
-            size: req.body.attachmentSize || 'Attachment',
-            type: req.body.attachmentType || 'application/octet-stream',
-            url: req.body.attachmentDataUrl || null
-        };
+
+        const { data: inserted, error } = await supabase
+            .from('notices')
+            .insert(newNoticeRow)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        const newNotice = rowToNotice(inserted);
+
+        try { io.emit('notice_created', { notice: newNotice }); } catch (err) { console.warn('Socket emit failed:', err.message); }
+        sendPushToCollege(assignedCollegeId, newNotice);
+
+        res.status(201).json({
+            success: true,
+            supabaseUrl: SUPABASE_URL,
+            message: 'Notice published successfully!',
+            notice: newNotice
+        });
+    } catch (err) {
+        console.error('POST /api/notices failed:', err);
+        res.status(500).json({ success: false, message: 'Failed to save notice.' });
     }
-
-    const assignedCollegeId = (collegeId ? collegeId.trim().toUpperCase() : 'COLLEGE001');
-
-    const newNotice = {
-        id: 'notice-' + Date.now(),
-        collegeId: assignedCollegeId,
-        title: title.trim(),
-        category: category.trim(),
-        publishDate: publishDate,
-        expiryDate: expiryDate || null,
-        description: description.trim(),
-        attachment: attachmentObj,
-        createdAt: new Date().toISOString()
-    };
-
-    notices.unshift(newNotice);
-    writeNoticesDB(notices);
-
-    // Emit realtime event
-    try { io.emit('notice_created', { notice: newNotice }); } catch (err) { console.warn('Socket emit failed:', err.message); }
-// Send push notifications to students of this college
-    sendPushToCollege(assignedCollegeId, newNotice);
-    res.status(201).json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        message: 'Notice published successfully!',
-        notice: newNotice
-    });
 });
 
 // --------------------------------------------------------------------------
 // 5. PUT Update Notice
 // --------------------------------------------------------------------------
-app.put('/api/notices/:id', upload.single('attachment'), (req, res) => {
+app.put('/api/notices/:id', upload.single('attachment'), async (req, res) => {
     const { id } = req.params;
     const { title, category, publishDate, expiryDate, description } = req.body;
 
-    const notices = readNoticesDB();
-    const index = notices.findIndex(n => n.id === id);
+    try {
+        const { data: existing, error: fetchError } = await supabase
+            .from('notices')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle();
 
-    if (index === -1) {
-        return res.status(404).json({ success: false, message: 'Notice not found.' });
-    }
-
-    let existingNotice = notices[index];
-    let attachmentObj = existingNotice.attachment;
-
-    if (req.file) {
-        if (existingNotice.attachment && existingNotice.attachment.filename) {
-            const oldPath = path.join(UPLOADS_DIR, existingNotice.attachment.filename);
-            if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        if (fetchError) throw fetchError;
+        if (!existing) {
+            return res.status(404).json({ success: false, message: 'Notice not found.' });
         }
 
-        const fileSizeMB = (req.file.size / (1024 * 1024)).toFixed(2);
-        const fileSizeKB = (req.file.size / 1024).toFixed(0);
-        attachmentObj = {
-            name: req.file.originalname,
-            filename: req.file.filename,
-            size: req.file.size > 1024 * 1024 ? `${fileSizeMB} MB` : `${fileSizeKB} KB`,
-            type: req.file.mimetype,
-            url: `/uploads/${req.file.filename}`
+        let attachmentObj = existing.attachment;
+
+        if (req.file) {
+            if (existing.attachment && existing.attachment.path) {
+                await deleteAttachmentFromSupabase(existing.attachment.path);
+            }
+            attachmentObj = await uploadAttachmentToSupabase(req.file);
+        }
+
+        const updateRow = {
+            title: title ? title.trim() : existing.title,
+            category: category ? category.trim() : existing.category,
+            publish_date: publishDate || existing.publish_date,
+            expiry_date: expiryDate !== undefined ? expiryDate : existing.expiry_date,
+            description: description ? description.trim() : existing.description,
+            attachment: attachmentObj
         };
+
+        const { data: updated, error: updateError } = await supabase
+            .from('notices')
+            .update(updateRow)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (updateError) throw updateError;
+
+        const updatedNotice = rowToNotice(updated);
+        try { io.emit('notice_updated', { notice: updatedNotice }); } catch (err) { console.warn('Socket emit failed:', err.message); }
+
+        res.json({
+            success: true,
+            supabaseUrl: SUPABASE_URL,
+            message: 'Notice updated successfully.',
+            notice: updatedNotice
+        });
+    } catch (err) {
+        console.error('PUT /api/notices/:id failed:', err);
+        res.status(500).json({ success: false, message: 'Failed to update notice.' });
     }
-
-    const updatedNotice = {
-        ...existingNotice,
-        title: title ? title.trim() : existingNotice.title,
-        category: category ? category.trim() : existingNotice.category,
-        publishDate: publishDate || existingNotice.publishDate,
-        expiryDate: expiryDate !== undefined ? expiryDate : existingNotice.expiryDate,
-        description: description ? description.trim() : existingNotice.description,
-        attachment: attachmentObj
-    };
-
-    notices[index] = updatedNotice;
-    writeNoticesDB(notices);
-
-    // Emit realtime update
-    try { io.emit('notice_updated', { notice: updatedNotice }); } catch (err) { console.warn('Socket emit failed:', err.message); }
-
-    res.json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        message: 'Notice updated successfully.',
-        notice: updatedNotice
-    });
 });
 
 // --------------------------------------------------------------------------
 // 6. DELETE Notice
 // --------------------------------------------------------------------------
-app.delete('/api/notices/:id', (req, res) => {
+app.delete('/api/notices/:id', async (req, res) => {
     const { id } = req.params;
-    const notices = readNoticesDB();
-    const noticeToDelete = notices.find(n => n.id === id);
 
-    if (!noticeToDelete) {
-        return res.status(404).json({ success: false, message: 'Notice not found.' });
-    }
+    try {
+        const { data: existing } = await supabase
+            .from('notices')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle();
 
-    if (noticeToDelete.attachment && noticeToDelete.attachment.filename) {
-        const filePath = path.join(UPLOADS_DIR, noticeToDelete.attachment.filename);
-        if (fs.existsSync(filePath)) {
-            try { fs.unlinkSync(filePath); } catch (err) {}
+        if (!existing) {
+            return res.status(404).json({ success: false, message: 'Notice not found.' });
         }
+
+        if (existing.attachment && existing.attachment.path) {
+            await deleteAttachmentFromSupabase(existing.attachment.path);
+        }
+
+        const { error } = await supabase.from('notices').delete().eq('id', id);
+        if (error) throw error;
+
+        try { io.emit('notice_deleted', { id }); } catch (err) { console.warn('Socket emit failed:', err.message); }
+
+        res.json({ success: true, supabaseUrl: SUPABASE_URL, message: 'Notice deleted successfully.' });
+    } catch (err) {
+        console.error('DELETE /api/notices/:id failed:', err);
+        res.status(500).json({ success: false, message: 'Failed to delete notice.' });
     }
-
-    const updatedNotices = notices.filter(n => n.id !== id);
-    writeNoticesDB(updatedNotices);
-
-    // Emit realtime delete
-    try { io.emit('notice_deleted', { id }); } catch (err) { console.warn('Socket emit failed:', err.message); }
-
-    res.json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        message: 'Notice deleted successfully.'
-    });
 });
 
 // --------------------------------------------------------------------------
 // 7. GET Analytics / Stats
 // --------------------------------------------------------------------------
-app.get('/api/stats', (req, res) => {
-    let notices = readNoticesDB();
+app.get('/api/stats', async (req, res) => {
     const { collegeId } = req.query;
 
-    if (collegeId) {
-        const cId = collegeId.trim().toUpperCase();
-        notices = notices.filter(n => (n.collegeId ? n.collegeId.toUpperCase() === cId : cId === 'COLLEGE001'));
+    try {
+        let query = supabase.from('notices').select('*');
+        if (collegeId) {
+            query = query.eq('college_id', collegeId.trim().toUpperCase());
+        }
+
+        const { data: notices, error } = await query;
+        if (error) throw error;
+
+        const total = notices.length;
+        const exams = notices.filter(n => n.category === 'Exams').length;
+        const events = notices.filter(n => n.category === 'Events').length;
+
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const recent = notices.filter(n => new Date(n.publish_date) >= sevenDaysAgo).length;
+
+        res.json({
+            success: true,
+            supabaseUrl: SUPABASE_URL,
+            stats: { total, exams, events, recent }
+        });
+    } catch (err) {
+        console.error('GET /api/stats failed:', err);
+        res.status(500).json({ success: false, message: 'Failed to load stats.' });
     }
-
-    const total = notices.length;
-    const exams = notices.filter(n => n.category === 'Exams').length;
-    const events = notices.filter(n => n.category === 'Events').length;
-
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const recent = notices.filter(n => new Date(n.publishDate) >= sevenDaysAgo).length;
-
-    res.json({
-        success: true,
-        supabaseUrl: SUPABASE_URL,
-        stats: { total, exams, events, recent }
-    });
-});
-
-// Start Server
-server.listen(PORT, () => {
-    console.log(`====================================================`);
-    console.log(`Digital Notice Board Online Production Server`);
-    console.log(`Frontend:               http://localhost:${PORT}`);
-    console.log(`Supabase configured:    ${Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)}`);
-    console.log(`Server Listening Port:  ${PORT}`);
-    console.log(`Socket.IO ready for realtime updates`);
-    console.log(`====================================================`);
-});
 });
 
 // Start Render server
 server.listen(PORT, '0.0.0.0', () => {
+    console.log(`====================================================`);
     console.log(`🚀 Digital Notice Board running on port ${PORT}`);
+    console.log(`Supabase configured: ${Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)}`);
+    console.log(`Socket.IO ready for realtime updates`);
+    console.log(`====================================================`);
 });
