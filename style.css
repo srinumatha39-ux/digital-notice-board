@@ -513,10 +513,25 @@ input, select, textarea { font-family: inherit; }
     display: flex; flex-direction: column;
     animation: modalPop 0.3s var(--ease-spring);
     margin: auto;
+    overflow: hidden;
 }
 .modal-card.modal-large { max-width: 660px; }
 .modal-card.modal-small { max-width: 380px; }
 @keyframes modalPop { from { opacity: 0; transform: scale(0.94) translateY(14px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+
+/* FIX: the Add/Edit Notice form wraps modal-body + modal-footer in a <form>.
+   A plain <form> is a block element, so it breaks the flex chain between
+   .modal-card and .modal-body — .modal-body's flex/min-height rules were
+   being ignored, the form grew to full content height, and there was
+   nothing left to scroll. Making the form itself a flex column restores
+   the chain so modal-body scrolls internally while header/footer stay put. */
+.modal-card > form {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
 
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .modal-header h3 { font-size: 16px; display: flex; align-items: center; gap: 8px; }
