@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Digital Notice Board - College Portal</title>
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -388,6 +388,9 @@
     <!-- ========================================== -->
     <section id="admin-dashboard-view" class="view-section">
         <div class="dashboard-layout">
+            <!-- Mobile Sidebar Backdrop -->
+            <div class="sidebar-backdrop" onclick="closeMobileSidebar('admin-sidebar')"></div>
+
             <!-- Sidebar Navigation -->
             <aside class="sidebar" id="admin-sidebar">
                 <div class="sidebar-brand">
@@ -541,6 +544,11 @@
                         <!-- Dynamic notice cards injected by JavaScript -->
                     </div>
                 </div>
+
+                <!-- Mobile Quick-Add Floating Button -->
+                <button class="fab-add-notice" onclick="openAddNoticeModal()" title="Add Notice">
+                    <i class="fa-solid fa-plus"></i>
+                </button>
             </div>
         </div>
     </section>
@@ -551,6 +559,9 @@
     <!-- ========================================== -->
     <section id="student-dashboard-view" class="view-section">
         <div class="dashboard-layout">
+            <!-- Mobile Sidebar Backdrop -->
+            <div class="sidebar-backdrop" onclick="closeMobileSidebar('student-sidebar')"></div>
+
             <!-- Student Sidebar Navigation -->
             <aside class="sidebar" id="student-sidebar">
                 <div class="sidebar-brand">
